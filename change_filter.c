@@ -3,6 +3,11 @@
 #include <gtk/gtk.h>
 #include <gdk/gdkx.h>
 
+#define BUGGY_CODE FALSE
+#define FORCE_RACE_CONDITIONS TRUE
+
+#define SLEEP_TIME 200000 /*us*/
+
 #define NAME "change_filter"
 
 #define WINDOW_WIDTH 400
@@ -17,7 +22,7 @@ typedef enum
   FILTER_UNSET
 } FilterStatus;
 
-#define APP_DATA_INIT {0, NULL, FILTER_UNSET, NULL}
+#define APP_DATA_INIT {0, NULL, FILTER_UNSET, NULL, NULL}
 
 typedef struct _AppData
 {
@@ -25,6 +30,7 @@ typedef struct _AppData
   GstElement *pipeline;
   FilterStatus filter_status;
   GtkWidget *statusbar;
+  GtkWidget *button;
 } AppData;
 
 static GstBusSyncReply
@@ -34,6 +40,24 @@ bus_sync_handler (GstBus *bus, GstMessage *message, gpointer user_data)
 
   // ignore anything but 'prepare-window-handle' element messages
   if (!gst_is_video_overlay_prepare_window_handle_message (message)) {
+    if (GST_MESSAGE_TYPE (message) == GST_MESSAGE_ERROR) {
+      GError *error;
+      gchar *debug;
+
+      gst_message_parse_error (message, &error, &debug);
+      GST_ERROR ("ERROR from element %s: %s",
+          GST_OBJECT_NAME (message->src), error->message);
+      if (debug) {
+        GST_ERROR ("Debugging info: %s", debug);
+      }
+      g_error_free (error);
+      g_free (debug);
+
+      g_assert_not_reached ();
+    } else if (GST_MESSAGE_TYPE (message) == GST_MESSAGE_WARNING) {
+      GST_ERROR ("Warning on bug: %"
+          GST_PTR_FORMAT, message);
+    }
     return GST_BUS_PASS;
   }
 
@@ -102,7 +126,9 @@ connect_element_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data)
   gst_pad_unlink (pad, peer);
 
   /* If an idle probe is used, this code works even if we stop for a while */
-//  g_usleep (1000000);
+#if FORCE_RACE_CONDITIONS
+  g_usleep (SLEEP_TIME);
+#endif
 
   /* Create element */
   filter = gst_element_factory_make ("clockoverlay", FILTER_NAME);
@@ -121,24 +147,19 @@ connect_element_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data)
   gtk_statusbar_push (GTK_STATUSBAR (app_data->statusbar), 0,
       "Filter added correctly");
   GST_DEBUG ("Filter added correctly");
+  app_data->filter_status = FILTER_SET;
+  gtk_widget_set_sensitive (app_data->button, TRUE);
 
   return GST_PAD_PROBE_REMOVE;
 }
 
 static void
-add_filter (AppData *app_data)
+connect_new_filter (AppData *app_data)
 {
   GstPad *src_pad;
   GstElement *src;
 
-  if (app_data->filter_status == FILTER_SET) {
-    GST_ERROR ("Filter already added");
-    gtk_statusbar_push (GTK_STATUSBAR (app_data->statusbar), 0,
-        "Filter already added");
-    return;
-  }
-
-  app_data->filter_status = FILTER_SET;
+  gtk_button_set_label (GTK_BUTTON (app_data->button), "Remove clockoverlay");
 
   src = gst_bin_get_by_name (GST_BIN (app_data->pipeline), SRC_NAME);
   g_assert (src);
@@ -148,13 +169,100 @@ add_filter (AppData *app_data)
   src_pad = gst_element_get_static_pad (src, "src");
   g_assert (src_pad);
 
+#if !BUGGY_CODE
   gst_pad_add_probe (src_pad, GST_PAD_PROBE_TYPE_IDLE, connect_element_probe,
       app_data, NULL);
+#else
   /* Trying to execute the same code directly may fail depending on race conditions */
-//  connect_element_probe (src_pad, NULL, app_data);
+  connect_element_probe (src_pad, NULL, app_data);
+#endif
 
   g_object_unref (src_pad);
   g_object_unref (src);
+}
+
+static GstPadProbeReturn
+disconnect_element_probe (GstPad *src_peer, GstPadProbeInfo *info,
+    gpointer data)
+{
+  GstPad *src_pad, *sink_peer, *sink_pad;
+  GstElement *filter;
+  AppData *app_data = data;
+
+  sink_pad = gst_pad_get_peer (src_peer);
+  g_assert (sink_pad);
+
+  filter = gst_pad_get_parent_element (sink_pad);
+  g_assert (filter);
+
+  src_pad = gst_element_get_static_pad (filter, "src");
+  sink_peer = gst_pad_get_peer (src_pad);
+  g_assert (sink_peer);
+
+
+  gst_pad_unlink (src_peer, sink_pad);
+  gst_pad_unlink (src_pad, sink_peer);
+#if FORCE_RACE_CONDITIONS
+  g_usleep (SLEEP_TIME);
+#endif
+  gst_pad_link (src_peer, sink_peer);
+
+  gst_element_set_state (filter, GST_STATE_NULL);
+  gst_bin_remove (GST_BIN (app_data->pipeline), filter);
+
+  g_object_unref (sink_peer);
+  g_object_unref (src_pad);
+  g_object_unref (sink_pad);
+  g_object_unref (filter);
+
+  app_data->filter_status = FILTER_UNSET;
+  gtk_widget_set_sensitive (app_data->button, TRUE);
+
+  return GST_PAD_PROBE_REMOVE;
+}
+
+static void
+disconnect_filter (AppData *app_data)
+{
+  GstPad *sink_pad, *src_peer;
+  GstElement
+      *filter = gst_bin_get_by_name (GST_BIN (app_data->pipeline), FILTER_NAME);
+
+  g_assert (filter);
+
+  sink_pad = gst_element_get_static_pad (filter, "video_sink");
+  g_assert (sink_pad);
+  src_peer = gst_pad_get_peer (sink_pad);
+  g_assert (src_peer);
+
+  gtk_button_set_label (GTK_BUTTON (app_data->button), "Add clockoverlay");
+
+  /* Note that we are waiting for the src pad to be idle, otherwise it can
+   * emit buffers while the pads are disconnected */
+#if !BUGGY_CODE
+  gst_pad_add_probe (src_peer, GST_PAD_PROBE_TYPE_IDLE,
+      disconnect_element_probe,
+      app_data, NULL);
+#else
+  // If calling without blocking it may fail
+  disconnect_element_probe (src_peer, NULL, app_data);
+#endif
+
+  g_object_unref (src_peer);
+  g_object_unref (sink_pad);
+  g_object_unref (filter);
+}
+
+static void
+add_filter (AppData *app_data)
+{
+  gtk_widget_set_sensitive (app_data->button, FALSE);
+
+  if (app_data->filter_status == FILTER_SET) {
+    disconnect_filter (app_data);
+  } else {
+    connect_new_filter (app_data);
+  }
 }
 
 static void
@@ -180,6 +288,7 @@ activate (GtkApplication *app, gpointer user_data)
   g_signal_connect_swapped (button, "clicked", G_CALLBACK (add_filter),
       app_data);
   gtk_container_add (GTK_CONTAINER (button_box), button);
+  app_data->button = button;
 
   video_window = gtk_drawing_area_new ();
   g_signal_connect (video_window, "realize",
