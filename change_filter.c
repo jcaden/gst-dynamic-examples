@@ -3,6 +3,9 @@
 #include <gtk/gtk.h>
 #include <gdk/gdkx.h>
 
+#define WINDOW_WIDTH 400
+#define WINDOW_HEIGHT 355
+
 #define APP_DATA_INIT {0, NULL}
 
 typedef struct _AppData
@@ -73,19 +76,31 @@ activate (GtkApplication *app, gpointer user_data)
   GtkWidget *window;
   GtkWidget *video_window;
   AppData *app_data = user_data;
+  GtkWidget *content, *button, *button_box;
 
   window = gtk_application_window_new (app);
   gtk_window_set_title (GTK_WINDOW (window), "Change filter");
-  gtk_window_set_default_size (GTK_WINDOW (window), 200, 200);
+  gtk_window_set_default_size (GTK_WINDOW (window), WINDOW_WIDTH, WINDOW_HEIGHT);
+
+  content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);
+  gtk_container_add (GTK_CONTAINER (window), content);
+
+  button_box = gtk_button_box_new (GTK_ORIENTATION_HORIZONTAL);
+  gtk_container_add (GTK_CONTAINER (content), button_box);
+
+  button = gtk_button_new_with_label ("Exit");
+  g_signal_connect_swapped (button, "clicked", G_CALLBACK (gtk_widget_destroy),
+      window);
+  gtk_container_add (GTK_CONTAINER (button_box), button);
 
   video_window = gtk_drawing_area_new ();
   g_signal_connect (video_window, "realize",
       G_CALLBACK (video_widget_realize_cb), app_data);
-
-  gtk_container_add (GTK_CONTAINER (window), video_window);
+  gtk_container_add (GTK_CONTAINER (content), video_window);
+  gtk_box_set_child_packing (GTK_BOX (content), video_window, TRUE, TRUE, 1,
+      GTK_PACK_START);
 
   gtk_widget_show_all (window);
-
   gtk_widget_realize (video_window);
 
   g_assert (app_data->video_window_handle != 0);
