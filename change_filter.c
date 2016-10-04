@@ -18,19 +18,16 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 #define SRC_NAME "src"
 #define FILTER_NAME "filter"
 
-typedef enum
-{
-  FILTER_SET,
-  FILTER_UNSET
-} FilterStatus;
+#define ADD_CLOCK_OVERLAY "Add clockoverlay"
+#define REMOVE_CLOCK_OVERLAY "Remove clockoverlay"
 
-#define APP_DATA_INIT {0, NULL, FILTER_UNSET, NULL, NULL}
+#define APP_DATA_INIT {0, NULL, FALSE, NULL, NULL}
 
 typedef struct _AppData
 {
   guintptr video_window_handle;
   GstElement *pipeline;
-  FilterStatus filter_status;
+  gboolean filter_set;
   GtkWidget *status_bar;
   GtkWidget *filter_button;
 } AppData;
@@ -111,6 +108,23 @@ create_pipeline (AppData *app_data)
   app_data->pipeline = pipeline;
 }
 
+static gboolean
+update_status (AppData *app_data)
+{
+  const gchar *message;
+
+  if (g_atomic_int_get (&app_data->filter_set)) {
+    message = "Filter added correctly";
+  } else {
+    message = "Filter removed correctly";
+  }
+  gtk_statusbar_push (GTK_STATUSBAR (app_data->status_bar), 0,
+      message);
+  gtk_widget_set_sensitive (app_data->filter_button, TRUE);
+
+  return G_SOURCE_REMOVE;
+}
+
 static GstPadProbeReturn
 connect_element_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data)
 {
@@ -148,10 +162,8 @@ connect_element_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data)
 
   GST_DEBUG ("Filter added correctly");
 
-  gtk_statusbar_push (GTK_STATUSBAR (app_data->status_bar), 0,
-      "Filter added correctly");
-  app_data->filter_status = FILTER_SET;
-  gtk_widget_set_sensitive (app_data->filter_button, TRUE);
+  g_atomic_int_set (&app_data->filter_set, TRUE);
+  g_idle_add ((GSourceFunc) update_status, app_data);
 
   return GST_PAD_PROBE_REMOVE;
 }
@@ -161,9 +173,6 @@ connect_new_filter (AppData *app_data)
 {
   GstPad *src_pad;
   GstElement *src;
-
-  gtk_button_set_label (GTK_BUTTON (app_data->filter_button),
-      "Remove clockoverlay");
 
   src = gst_bin_get_by_name (GST_BIN (app_data->pipeline), SRC_NAME);
   g_assert (src);
@@ -221,10 +230,8 @@ disconnect_element_probe (GstPad *src_peer, GstPadProbeInfo *info,
 
   GST_DEBUG ("Filter removed correctly");
 
-  app_data->filter_status = FILTER_UNSET;
-  gtk_statusbar_push (GTK_STATUSBAR (app_data->status_bar), 0,
-      "Filter removed correctly");
-  gtk_widget_set_sensitive (app_data->filter_button, TRUE);
+  g_atomic_int_set (&app_data->filter_set,  FALSE);
+  g_idle_add ((GSourceFunc) update_status, app_data);
 
   return GST_PAD_PROBE_REMOVE;
 }
@@ -242,9 +249,6 @@ disconnect_filter (AppData *app_data)
   g_assert (sink_pad);
   src_peer = gst_pad_get_peer (sink_pad);
   g_assert (src_peer);
-
-  gtk_button_set_label (GTK_BUTTON (app_data->filter_button),
-      "Add clockoverlay");
 
   /* Note that we are waiting for the src pad to be idle, otherwise it can
    * emit buffers while the pads are disconnected */
@@ -266,9 +270,13 @@ filter_button_clicked (AppData *app_data)
 {
   gtk_widget_set_sensitive (app_data->filter_button, FALSE);
 
-  if (app_data->filter_status == FILTER_SET) {
+  if (g_atomic_int_get (&app_data->filter_set)) {
+    gtk_button_set_label (GTK_BUTTON (app_data->filter_button),
+        ADD_CLOCK_OVERLAY);
     disconnect_filter (app_data);
   } else {
+    gtk_button_set_label (GTK_BUTTON (app_data->filter_button),
+        REMOVE_CLOCK_OVERLAY);
     connect_new_filter (app_data);
   }
 }
@@ -291,7 +299,7 @@ activate_gui (GtkApplication *app, gpointer user_data)
   button_box = gtk_button_box_new (GTK_ORIENTATION_HORIZONTAL);
   gtk_container_add (GTK_CONTAINER (window_content), button_box);
 
-  filter_button = gtk_button_new_with_label ("Add clockoverlay");
+  filter_button = gtk_button_new_with_label (ADD_CLOCK_OVERLAY);
   g_signal_connect_swapped (filter_button, "clicked",
       G_CALLBACK (filter_button_clicked), app_data);
   gtk_container_add (GTK_CONTAINER (button_box), filter_button);
