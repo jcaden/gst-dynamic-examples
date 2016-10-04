@@ -13,15 +13,19 @@
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
 #define WINDOW_WIDTH 400
-#define WINDOW_HEIGHT 393
+#define WINDOW_HEIGHT 400
 
 #define SRC_NAME "src"
 #define FILTER_NAME "filter"
+#define TEE_NAME "tee"
 
 #define ADD_CLOCK_OVERLAY "Add clockoverlay"
 #define REMOVE_CLOCK_OVERLAY "Remove clockoverlay"
 
-#define APP_DATA_INIT {0, NULL, FALSE, NULL, NULL}
+#define START_RECORDING "Start recording"
+#define STOP_RECORDING "Stop recording"
+
+#define APP_DATA_INIT {0, NULL, FALSE, NULL, NULL, NULL}
 
 typedef struct _AppData
 {
@@ -30,6 +34,7 @@ typedef struct _AppData
   gboolean filter_set;
   GtkWidget *status_bar;
   GtkWidget *filter_button;
+  GtkWidget *record_button;
 } AppData;
 
 static GstBusSyncReply
@@ -89,8 +94,9 @@ create_pipeline (AppData *app_data)
   GError *err = NULL;
   GstBus *bus;
   GstElement *pipeline =
-      gst_parse_launch ("v4l2src name=" SRC_NAME " ! autovideosink name=sink",
-          &err);
+      gst_parse_launch (
+          "v4l2src name=" SRC_NAME " ! tee name=" TEE_NAME
+              " ! queue ! autovideosink name=sink", &err);
 
   if (pipeline == NULL) {
     GST_ERROR ("Error while creating the pipeline: %s", err->message);
@@ -109,7 +115,7 @@ create_pipeline (AppData *app_data)
 }
 
 static gboolean
-update_status (AppData *app_data)
+update_filter_widgets_status (AppData *app_data)
 {
   const gchar *message;
 
@@ -163,7 +169,7 @@ connect_element_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data)
   GST_DEBUG ("Filter added correctly");
 
   g_atomic_int_set (&app_data->filter_set, TRUE);
-  g_idle_add ((GSourceFunc) update_status, app_data);
+  g_idle_add ((GSourceFunc) update_filter_widgets_status, app_data);
 
   return GST_PAD_PROBE_REMOVE;
 }
@@ -230,8 +236,8 @@ disconnect_element_probe (GstPad *src_peer, GstPadProbeInfo *info,
 
   GST_DEBUG ("Filter removed correctly");
 
-  g_atomic_int_set (&app_data->filter_set,  FALSE);
-  g_idle_add ((GSourceFunc) update_status, app_data);
+  g_atomic_int_set (&app_data->filter_set, FALSE);
+  g_idle_add ((GSourceFunc) update_filter_widgets_status, app_data);
 
   return GST_PAD_PROBE_REMOVE;
 }
@@ -282,10 +288,18 @@ filter_button_clicked (AppData *app_data)
 }
 
 static void
+record_button_clicked (AppData *app_data)
+{
+  gtk_widget_set_sensitive (app_data->record_button, FALSE);
+
+  GST_ERROR ("Not implemented");
+}
+
+static void
 activate_gui (GtkApplication *app, gpointer user_data)
 {
   GtkWidget *window, *video_widget, *window_content, *filter_button,
-      *button_box, *status_bar;
+      *record_button, *button_box, *status_bar;
   AppData *app_data = user_data;
 
   window = gtk_application_window_new (app);
@@ -293,17 +307,24 @@ activate_gui (GtkApplication *app, gpointer user_data)
   gtk_window_set_default_size (GTK_WINDOW (window), WINDOW_WIDTH,
       WINDOW_HEIGHT);
 
-  window_content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);
+  window_content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
   gtk_container_add (GTK_CONTAINER (window), window_content);
 
   button_box = gtk_button_box_new (GTK_ORIENTATION_HORIZONTAL);
   gtk_container_add (GTK_CONTAINER (window_content), button_box);
+  gtk_button_box_set_layout (GTK_BUTTON_BOX (button_box), GTK_BUTTONBOX_EXPAND);
 
   filter_button = gtk_button_new_with_label (ADD_CLOCK_OVERLAY);
   g_signal_connect_swapped (filter_button, "clicked",
       G_CALLBACK (filter_button_clicked), app_data);
   gtk_container_add (GTK_CONTAINER (button_box), filter_button);
   app_data->filter_button = filter_button;
+
+  record_button = gtk_button_new_with_label (START_RECORDING);
+  g_signal_connect_swapped (record_button, "clicked",
+      G_CALLBACK (record_button_clicked), app_data);
+  gtk_container_add (GTK_CONTAINER (button_box), record_button);
+  app_data->record_button = record_button;
 
   video_widget = gtk_drawing_area_new ();
   g_signal_connect (video_widget, "realize",
