@@ -315,14 +315,18 @@ main (int argc, char **argv)
   GtkApplication *app;
   int status;
   AppData app_data = APP_DATA_INIT;
+  GOptionGroup *gst_group;
 
   gst_init (&argc, &argv);
+  gst_group = gst_init_get_option_group ();
 
   GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, NAME, 0, NAME);
 
   app = gtk_application_new ("org.kurento.change_filter",
       G_APPLICATION_FLAGS_NONE);
   g_signal_connect (app, "activate", G_CALLBACK (activate), &app_data);
+
+  g_application_add_option_group (G_APPLICATION (app), gst_group);
   status = g_application_run (G_APPLICATION (app), argc, argv);
   g_object_unref (app);
 
