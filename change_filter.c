@@ -4,11 +4,13 @@
 #include <gdk/gdkx.h>
 
 #define BUGGY_CODE FALSE
-#define FORCE_RACE_CONDITIONS TRUE
+#define FORCE_RACE_CONDITIONS FALSE
 
 #define SLEEP_TIME 200000 /*us*/
 
 #define NAME "change_filter"
+#define GST_CAT_DEFAULT change_filter
+GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
 #define WINDOW_WIDTH 400
 #define WINDOW_HEIGHT 393
@@ -29,8 +31,8 @@ typedef struct _AppData
   guintptr video_window_handle;
   GstElement *pipeline;
   FilterStatus filter_status;
-  GtkWidget *statusbar;
-  GtkWidget *button;
+  GtkWidget *status_bar;
+  GtkWidget *filter_button;
 } AppData;
 
 static GstBusSyncReply
@@ -144,11 +146,12 @@ connect_element_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data)
 
   g_object_unref (peer);
 
-  gtk_statusbar_push (GTK_STATUSBAR (app_data->statusbar), 0,
-      "Filter added correctly");
   GST_DEBUG ("Filter added correctly");
+
+  gtk_statusbar_push (GTK_STATUSBAR (app_data->status_bar), 0,
+      "Filter added correctly");
   app_data->filter_status = FILTER_SET;
-  gtk_widget_set_sensitive (app_data->button, TRUE);
+  gtk_widget_set_sensitive (app_data->filter_button, TRUE);
 
   return GST_PAD_PROBE_REMOVE;
 }
@@ -159,7 +162,8 @@ connect_new_filter (AppData *app_data)
   GstPad *src_pad;
   GstElement *src;
 
-  gtk_button_set_label (GTK_BUTTON (app_data->button), "Remove clockoverlay");
+  gtk_button_set_label (GTK_BUTTON (app_data->filter_button),
+      "Remove clockoverlay");
 
   src = gst_bin_get_by_name (GST_BIN (app_data->pipeline), SRC_NAME);
   g_assert (src);
@@ -215,8 +219,12 @@ disconnect_element_probe (GstPad *src_peer, GstPadProbeInfo *info,
   g_object_unref (sink_pad);
   g_object_unref (filter);
 
+  GST_DEBUG ("Filter removed correctly");
+
   app_data->filter_status = FILTER_UNSET;
-  gtk_widget_set_sensitive (app_data->button, TRUE);
+  gtk_statusbar_push (GTK_STATUSBAR (app_data->status_bar), 0,
+      "Filter removed correctly");
+  gtk_widget_set_sensitive (app_data->filter_button, TRUE);
 
   return GST_PAD_PROBE_REMOVE;
 }
@@ -235,14 +243,14 @@ disconnect_filter (AppData *app_data)
   src_peer = gst_pad_get_peer (sink_pad);
   g_assert (src_peer);
 
-  gtk_button_set_label (GTK_BUTTON (app_data->button), "Add clockoverlay");
+  gtk_button_set_label (GTK_BUTTON (app_data->filter_button),
+      "Add clockoverlay");
 
   /* Note that we are waiting for the src pad to be idle, otherwise it can
    * emit buffers while the pads are disconnected */
 #if !BUGGY_CODE
   gst_pad_add_probe (src_peer, GST_PAD_PROBE_TYPE_IDLE,
-      disconnect_element_probe,
-      app_data, NULL);
+      disconnect_element_probe, app_data, NULL);
 #else
   // If calling without blocking it may fail
   disconnect_element_probe (src_peer, NULL, app_data);
@@ -254,9 +262,9 @@ disconnect_filter (AppData *app_data)
 }
 
 static void
-add_filter (AppData *app_data)
+filter_button_clicked (AppData *app_data)
 {
-  gtk_widget_set_sensitive (app_data->button, FALSE);
+  gtk_widget_set_sensitive (app_data->filter_button, FALSE);
 
   if (app_data->filter_status == FILTER_SET) {
     disconnect_filter (app_data);
@@ -266,43 +274,42 @@ add_filter (AppData *app_data)
 }
 
 static void
-activate (GtkApplication *app, gpointer user_data)
+activate_gui (GtkApplication *app, gpointer user_data)
 {
-  GtkWidget *window;
-  GtkWidget *video_window;
+  GtkWidget *window, *video_widget, *window_content, *filter_button,
+      *button_box, *status_bar;
   AppData *app_data = user_data;
-  GtkWidget *content, *button, *button_box, *statusbar;
 
   window = gtk_application_window_new (app);
   gtk_window_set_title (GTK_WINDOW (window), "Change filter");
   gtk_window_set_default_size (GTK_WINDOW (window), WINDOW_WIDTH,
       WINDOW_HEIGHT);
 
-  content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);
-  gtk_container_add (GTK_CONTAINER (window), content);
+  window_content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);
+  gtk_container_add (GTK_CONTAINER (window), window_content);
 
   button_box = gtk_button_box_new (GTK_ORIENTATION_HORIZONTAL);
-  gtk_container_add (GTK_CONTAINER (content), button_box);
+  gtk_container_add (GTK_CONTAINER (window_content), button_box);
 
-  button = gtk_button_new_with_label ("Add clockoverlay");
-  g_signal_connect_swapped (button, "clicked", G_CALLBACK (add_filter),
-      app_data);
-  gtk_container_add (GTK_CONTAINER (button_box), button);
-  app_data->button = button;
+  filter_button = gtk_button_new_with_label ("Add clockoverlay");
+  g_signal_connect_swapped (filter_button, "clicked",
+      G_CALLBACK (filter_button_clicked), app_data);
+  gtk_container_add (GTK_CONTAINER (button_box), filter_button);
+  app_data->filter_button = filter_button;
 
-  video_window = gtk_drawing_area_new ();
-  g_signal_connect (video_window, "realize",
+  video_widget = gtk_drawing_area_new ();
+  g_signal_connect (video_widget, "realize",
       G_CALLBACK (video_widget_realize_cb), app_data);
-  gtk_container_add (GTK_CONTAINER (content), video_window);
-  gtk_box_set_child_packing (GTK_BOX (content), video_window, TRUE, TRUE, 1,
-      GTK_PACK_START);
+  gtk_container_add (GTK_CONTAINER (window_content), video_widget);
+  gtk_box_set_child_packing (GTK_BOX (window_content), video_widget, TRUE, TRUE,
+      1, GTK_PACK_START);
 
-  statusbar = gtk_statusbar_new ();
-  gtk_container_add (GTK_CONTAINER (content), statusbar);
-  app_data->statusbar = statusbar;
+  status_bar = gtk_statusbar_new ();
+  gtk_container_add (GTK_CONTAINER (window_content), status_bar);
+  app_data->status_bar = status_bar;
 
   gtk_widget_show_all (window);
-  gtk_widget_realize (video_window);
+  gtk_widget_realize (video_widget);
 
   g_assert (app_data->video_window_handle != 0);
 
@@ -324,7 +331,7 @@ main (int argc, char **argv)
 
   app = gtk_application_new ("org.kurento.change_filter",
       G_APPLICATION_FLAGS_NONE);
-  g_signal_connect (app, "activate", G_CALLBACK (activate), &app_data);
+  g_signal_connect (app, "activate", G_CALLBACK (activate_gui), &app_data);
 
   g_application_add_option_group (G_APPLICATION (app), gst_group);
   status = g_application_run (G_APPLICATION (app), argc, argv);
