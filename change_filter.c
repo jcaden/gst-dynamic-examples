@@ -5,6 +5,7 @@
 
 #define BUGGY_CODE FALSE
 #define FORCE_RACE_CONDITIONS FALSE
+#define RECORD_H264 FALSE
 
 #define SLEEP_TIME 200000 /*us*/
 
@@ -98,10 +99,11 @@ create_pipeline (AppData *app_data)
 {
   GError *err = NULL;
   GstBus *bus;
+  /* We add a capsfilter to avoid renegotiation that could stop the camera */
   GstElement *pipeline =
       gst_parse_launch (
-          "v4l2src name=" SRC_NAME " ! tee name=" TEE_NAME
-              " ! queue ! autovideosink name=sink", &err);
+          "v4l2src name=" SRC_NAME " ! video/x-raw,format=(string)YUY2 ! "
+              "tee name=" TEE_NAME " ! queue ! autovideosink name=sink", &err);
 
   if (pipeline == NULL) {
     GST_ERROR ("Error while creating the pipeline: %s", err->message);
@@ -207,8 +209,6 @@ connect_new_filter (AppData *app_data)
 
   src = gst_bin_get_by_name (GST_BIN (app_data->pipeline), SRC_NAME);
   g_assert (src);
-  GST_DEBUG_OBJECT (src, SRC_NAME
-      " found");
 
   src_pad = gst_element_get_static_pad (src, "src");
   g_assert (src_pad);
@@ -324,13 +324,23 @@ start_recording (AppData *app_data)
   tee_src = gst_element_get_request_pad (tee, "src_%u");
   g_assert (tee_src);
 
-  /* We add a videoconvert to avoid caps renegotiation that could stop the camera */
+  /* We add a videoconvert to handle video conversions if required as camera
+   * caps are fixed */
+#if !RECORD_H264
   /* Vp8enc is configured for real time otherwise the buffers will be delayed */
   recording_bin = gst_parse_bin_from_description (
       "queue max-size-buffers=0 ! videoconvert !"
           " vp8enc deadline=1 threads=1 ! matroskamux !"
           " filesink name=" FILE_SINK_NAME " sync=false location=" FILE_LOCATION,
       TRUE, &error);
+#else
+  /* x264enc is configured for real time otherwise the buffers will be delayed */
+  recording_bin = gst_parse_bin_from_description (
+      "queue max-size-buffers=0 ! videoconvert ! "
+          " x264enc speed-preset=ultrafast ! matroskamux !"
+          " filesink name=" FILE_SINK_NAME " sync=false location=" FILE_LOCATION,
+      TRUE, &error);
+#endif
 
   if (recording_bin == NULL) {
     GST_ERROR ("Error creating bin: %s", error->message);
