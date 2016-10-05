@@ -18,6 +18,9 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 #define SRC_NAME "src"
 #define FILTER_NAME "filter"
 #define TEE_NAME "tee"
+#define RECORDER_NAME "recorder_bin"
+
+#define FILE_LOCATION "/tmp/test.webm"
 
 #define ADD_CLOCK_OVERLAY "Add clockoverlay"
 #define REMOVE_CLOCK_OVERLAY "Remove clockoverlay"
@@ -288,11 +291,43 @@ filter_button_clicked (AppData *app_data)
 }
 
 static void
+start_recording (AppData *app_data)
+{
+  GError *error = NULL;
+  GstElement *tee, *recording_bin;
+
+  tee = gst_bin_get_by_name (GST_BIN (app_data->pipeline), TEE_NAME);
+  g_assert (tee);
+
+  /* We add a videoconvert to avoid caps renegotiation that could stop the camera */
+  /* Vp8enc is configured for real time otherwise the buffers will be delayed */
+  recording_bin = gst_parse_bin_from_description (
+      "queue max-size-buffers=0 ! videoconvert !"
+          " vp8enc deadline=1 threads=1 ! matroskamux !"
+          " filesink sync=false location=" FILE_LOCATION,
+      TRUE, &error);
+
+  if (recording_bin == NULL) {
+    GST_ERROR ("Error creating bin: %s", error->message);
+    g_clear_error (&error);
+    g_assert_not_reached ();
+  }
+
+  gst_object_set_name (GST_OBJECT (recording_bin), RECORDER_NAME);
+  gst_bin_add (GST_BIN (app_data->pipeline), recording_bin);
+  gst_element_sync_state_with_parent (recording_bin);
+
+  g_assert (gst_element_link_pads (tee, NULL, recording_bin, NULL));
+
+  g_object_unref (tee);
+}
+
+static void
 record_button_clicked (AppData *app_data)
 {
   gtk_widget_set_sensitive (app_data->record_button, FALSE);
 
-  GST_ERROR ("Not implemented");
+  start_recording (app_data);
 }
 
 static void
