@@ -18,7 +18,7 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 #define SRC_NAME "src"
 #define FILTER_NAME "filter"
 #define TEE_NAME "tee"
-#define RECORDER_NAME "recorder_bin"
+#define FILE_SINK_NAME "file_sink"
 
 #define FILE_LOCATION "/tmp/test.webm"
 
@@ -28,7 +28,7 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 #define START_RECORDING "Start recording"
 #define STOP_RECORDING "Stop recording"
 
-#define APP_DATA_INIT {0, NULL, FALSE, NULL, NULL, NULL}
+#define APP_DATA_INIT {0, NULL, FALSE, NULL, NULL, NULL, FALSE, NULL}
 
 typedef struct _AppData
 {
@@ -38,6 +38,8 @@ typedef struct _AppData
   GtkWidget *status_bar;
   GtkWidget *filter_button;
   GtkWidget *record_button;
+  gboolean recording;
+  GstPad *recording_sink;
 } AppData;
 
 static GstBusSyncReply
@@ -133,6 +135,26 @@ update_filter_widgets_status (AppData *app_data)
 
   return G_SOURCE_REMOVE;
 }
+
+static gboolean
+update_recording_widgets_status (AppData *app_data)
+{
+  const gchar *message;
+
+  if (g_atomic_int_get (&app_data->recording)) {
+    message = "Recording started correctly";
+  } else {
+    message = "Recording stopped correctly";
+    /* This is always modified from gui thread */
+    g_clear_object (&app_data->recording_sink);
+  }
+  gtk_statusbar_push (GTK_STATUSBAR (app_data->status_bar), 0,
+      message);
+  gtk_widget_set_sensitive (app_data->record_button, TRUE);
+
+  return G_SOURCE_REMOVE;
+}
+
 
 static GstPadProbeReturn
 connect_element_probe (GstPad *pad, GstPadProbeInfo *info, gpointer data)
@@ -294,17 +316,20 @@ static void
 start_recording (AppData *app_data)
 {
   GError *error = NULL;
+  GstPad *tee_src;
   GstElement *tee, *recording_bin;
 
   tee = gst_bin_get_by_name (GST_BIN (app_data->pipeline), TEE_NAME);
   g_assert (tee);
+  tee_src = gst_element_get_request_pad (tee, "src_%u");
+  g_assert (tee_src);
 
   /* We add a videoconvert to avoid caps renegotiation that could stop the camera */
   /* Vp8enc is configured for real time otherwise the buffers will be delayed */
   recording_bin = gst_parse_bin_from_description (
       "queue max-size-buffers=0 ! videoconvert !"
           " vp8enc deadline=1 threads=1 ! matroskamux !"
-          " filesink sync=false location=" FILE_LOCATION,
+          " filesink name=" FILE_SINK_NAME " sync=false location=" FILE_LOCATION,
       TRUE, &error);
 
   if (recording_bin == NULL) {
@@ -313,13 +338,127 @@ start_recording (AppData *app_data)
     g_assert_not_reached ();
   }
 
-  gst_object_set_name (GST_OBJECT (recording_bin), RECORDER_NAME);
   gst_bin_add (GST_BIN (app_data->pipeline), recording_bin);
   gst_element_sync_state_with_parent (recording_bin);
 
-  g_assert (gst_element_link_pads (tee, NULL, recording_bin, NULL));
+  g_assert (
+      gst_element_link_pads (tee, GST_OBJECT_NAME (tee_src), recording_bin,
+          NULL));
 
+  if (app_data->recording_sink) {
+    GST_ERROR ("Recording sink is already set, this should not happen");
+    g_assert (!app_data->recording_sink);
+  }
+
+  /* This is always modified from gui thread */
+  app_data->recording_sink = gst_pad_get_peer (tee_src);
+
+  g_object_unref (tee_src);
   g_object_unref (tee);
+
+  g_atomic_int_set (&app_data->recording, TRUE);
+  g_idle_add ((GSourceFunc) update_recording_widgets_status, app_data);
+}
+
+static gboolean
+release_recording_bin (gpointer recording_bin)
+{
+  gst_element_set_state (recording_bin, GST_STATE_NULL);
+
+  return G_SOURCE_REMOVE;
+}
+
+static GstPadProbeReturn
+filesink_eos_probe (GstPad *tee_src, GstPadProbeInfo *info, gpointer data)
+{
+  GstElement *recording_bin;
+  AppData *app_data = data;
+
+#if !BUGGY_CODE
+  {
+    GstEvent *event = GST_PAD_PROBE_INFO_EVENT (info);
+
+    if (GST_EVENT_TYPE (event) != GST_EVENT_EOS) {
+      return GST_PAD_PROBE_OK;
+    }
+  }
+#endif
+  recording_bin = gst_pad_get_parent_element (app_data->recording_sink);
+  g_assert (recording_bin);
+
+  gst_bin_remove (GST_BIN (app_data->pipeline), recording_bin);
+
+  /* State should be changed from a different thread, as this is queue
+   * streaming thread if not buggy code */
+  g_idle_add_full (G_PRIORITY_DEFAULT, release_recording_bin, recording_bin,
+      g_object_unref);
+
+  g_atomic_int_set (&app_data->recording, FALSE);
+  g_idle_add ((GSourceFunc) update_recording_widgets_status, app_data);
+
+  return GST_PAD_PROBE_REMOVE;
+}
+
+static GstPadProbeReturn
+stop_recording_probe (GstPad *tee_src, GstPadProbeInfo *info, gpointer data)
+{
+  AppData *app_data = data;
+  GstElement *tee, *filesink;
+  GstPad *filesink_sink;
+
+  g_assert (app_data->recording_sink);
+
+  gst_pad_unlink (tee_src, app_data->recording_sink);
+
+  filesink = gst_bin_get_by_name_recurse_up (GST_BIN (app_data->pipeline),
+      FILE_SINK_NAME);
+  g_assert (filesink);
+  filesink_sink = gst_element_get_static_pad (filesink, "sink");
+  g_assert (filesink_sink);
+
+#if !BUGGY_CODE
+  /* Send eos event to finish file correctly */
+  gst_pad_add_probe (filesink_sink, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+      filesink_eos_probe, app_data, NULL);
+  gst_pad_send_event (app_data->recording_sink, gst_event_new_eos ());
+#else
+  gst_pad_send_event (app_data->recording_sink, gst_event_new_eos ());
+  filesink_eos_probe (filesink_sink, NULL, app_data);
+#endif
+
+  g_object_unref (filesink_sink);
+  g_object_unref (filesink);
+
+  tee = gst_pad_get_parent_element (tee_src);
+  g_assert (tee);
+  gst_element_remove_pad (tee, tee_src);
+  g_object_unref (tee);
+
+  return GST_PAD_PROBE_REMOVE;
+}
+
+static void
+stop_recording (AppData *app_data)
+{
+  GstPad *tee_src;
+
+  if (!app_data->recording_sink) {
+    GST_ERROR ("Recording sink is not set, this should not happen");
+    g_assert (app_data->recording_sink);
+  }
+
+  tee_src = gst_pad_get_peer (app_data->recording_sink);
+  g_assert (tee_src);
+
+  /* Remember to block on src pad */
+#if !BUGGY_CODE
+  gst_pad_add_probe (tee_src, GST_PAD_PROBE_TYPE_IDLE, stop_recording_probe,
+      app_data, NULL);
+#else
+  stop_recording_probe (tee_src, NULL, app_data);
+#endif
+
+  g_object_unref (tee_src);
 }
 
 static void
@@ -327,7 +466,15 @@ record_button_clicked (AppData *app_data)
 {
   gtk_widget_set_sensitive (app_data->record_button, FALSE);
 
-  start_recording (app_data);
+  if (g_atomic_int_get (&app_data->recording)) {
+    gtk_button_set_label (GTK_BUTTON (app_data->record_button),
+        START_RECORDING);
+    stop_recording (app_data);
+  } else {
+    gtk_button_set_label (GTK_BUTTON (app_data->record_button),
+        STOP_RECORDING);
+    start_recording (app_data);
+  }
 }
 
 static void
@@ -401,10 +548,17 @@ main (int argc, char **argv)
   status = g_application_run (G_APPLICATION (app), argc, argv);
   g_object_unref (app);
 
+  if (app_data.recording_sink != NULL) {
+    g_clear_object (&app_data.recording_sink);
+  }
+
   if (app_data.pipeline != NULL) {
+    gst_element_send_event (app_data.pipeline, gst_event_new_eos ());
     gst_element_set_state (app_data.pipeline, GST_STATE_NULL);
     g_clear_object (&app_data.pipeline);
   }
+
+  gst_deinit ();
 
   return status;
 }
