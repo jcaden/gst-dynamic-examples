@@ -20,7 +20,7 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 #define TEE_NAME "tee"
 #define FILE_SINK_NAME "file_sink"
 
-#define FILE_LOCATION "/tmp/test.webm"
+#define FILE_LOCATION "/tmp/test.mkv"
 
 #define ADD_CLOCK_OVERLAY "Add clockoverlay"
 #define REMOVE_CLOCK_OVERLAY "Remove clockoverlay"
