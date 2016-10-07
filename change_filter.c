@@ -2,6 +2,8 @@
 #include <gst/video/videooverlay.h>
 #include <gtk/gtk.h>
 #include <gdk/gdkx.h>
+#include <stdlib.h>
+#include <memory.h>
 
 #define BUGGY_CODE FALSE
 #define FORCE_RACE_CONDITIONS FALSE
@@ -488,10 +490,52 @@ record_button_clicked (AppData *app_data)
 }
 
 static void
+graph_button_clicked (AppData *app_data)
+{
+  gchar *file_name;
+  GFileIOStream *iostream = NULL;
+  GError *error = NULL;
+  GFile *file = g_file_new_tmp ("graph_XXXXXX", &iostream, &error);
+  gchar *data;
+  gsize bytes_written;
+
+  if (!file) {
+    GST_ERROR ("Error creating file: %s", error->message);
+    g_assert_not_reached ();
+  }
+
+  data = gst_debug_bin_to_dot_data (GST_BIN (app_data->pipeline),
+      GST_DEBUG_GRAPH_SHOW_ALL);
+
+  if (!g_output_stream_write_all (
+      g_io_stream_get_output_stream (G_IO_STREAM (iostream)), data,
+      strlen (data), &bytes_written, NULL, &error)) {
+    GST_ERROR ("Error while writing dot file: %s", error->message);
+    g_assert_not_reached ();
+  }
+
+  g_free (data);
+
+  file_name = g_file_get_path (file);
+
+  g_object_unref (iostream);
+  g_object_unref (file);
+
+  GST_ERROR ("File is: %s", file_name);
+
+  if (fork () == 0) {
+    execlp ("xdot", "xdot", file_name, NULL);
+    exit (0);
+  }
+
+  g_free (file_name);
+}
+
+static void
 activate_gui (GtkApplication *app, gpointer user_data)
 {
   GtkWidget *window, *video_widget, *window_content, *filter_button,
-      *record_button, *button_box, *status_bar;
+      *record_button, *graph_button, *button_box, *status_bar;
   AppData *app_data = user_data;
 
   window = gtk_application_window_new (app);
@@ -518,6 +562,11 @@ activate_gui (GtkApplication *app, gpointer user_data)
   gtk_container_add (GTK_CONTAINER (button_box), record_button);
   app_data->record_button = record_button;
 
+  graph_button = gtk_button_new_with_label ("Generate graph");
+  g_signal_connect_swapped (graph_button, "clicked",
+      G_CALLBACK (graph_button_clicked), app_data);
+  gtk_container_add (GTK_CONTAINER (button_box), graph_button);
+
   video_widget = gtk_drawing_area_new ();
   g_signal_connect (video_widget, "realize",
       G_CALLBACK (video_widget_realize_cb), app_data);
@@ -537,6 +586,12 @@ activate_gui (GtkApplication *app, gpointer user_data)
   create_pipeline (app_data);
 }
 
+static void
+kill_children ()
+{
+  kill ((pid_t) 0, SIGINT);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -544,6 +599,8 @@ main (int argc, char **argv)
   int status;
   AppData app_data = APP_DATA_INIT;
   GOptionGroup *gst_group;
+
+  atexit (kill_children);
 
   gst_init (&argc, &argv);
   gst_group = gst_init_get_option_group ();
